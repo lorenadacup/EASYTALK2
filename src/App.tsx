@@ -35,7 +35,9 @@ import {
   playConditionTone,
   triggerHapticFeedback,
   speakText,
+  stopSpeech,
 } from './utils/audioUtils';
+import { voiceEngine } from './utils/voiceCommandEngine';
 
 const DEFAULT_SETTINGS: VoiceSettings = {
   language: 'tl',
@@ -237,14 +239,26 @@ export default function App() {
     });
   }, []);
 
-  // Play spoken audio guide for blind users
+  // Play spoken audio guide for blind users — includes voice command list
   const playEyesClosedAudioGuide = useCallback(() => {
     triggerHapticFeedback([50, 50, 100]);
     playSuccessChime();
     const isTl = voiceSettings.language === 'tl';
     const guideText = isTl
-      ? 'Gabay sa boses para sa may kapansanan sa paningin. Pindutin ang numero 1 para sa Tulong. Pindutin ang 2 para sa Pagkain. Pindutin ang 3 para sa Tubig. Pindutin ang 4 kapag Masama ang Pakiramdam. Pindutin ang 5 para Umuwi. Pindutin ang 6 para sa Sariling Mensahe. Pindutin ang Spacebar anumang oras upang marinig muli ang mensahe.'
-      : 'Audio Guide for Blind Accessibility. Press number 1 on your keyboard for Assistance. Press 2 for Food. Press 3 for Water. Press 4 for Unwell. Press 5 for Home. Press 6 for Custom Message. Press Spacebar anytime to repeat your message. Tapping any card also speaks it aloud immediately.';
+      ? 'Gabay sa boses para sa may kapansanan sa paningin. ' +
+        'Pindutin ang numero 1 para sa Tulong. Pindutin ang 2 para sa Pagkain. Pindutin ang 3 para sa Tubig. ' +
+        'Pindutin ang 4 kapag Masama ang Pakiramdam. Pindutin ang 5 para Umuwi. Pindutin ang 6 para sa Sariling Mensahe. ' +
+        'Pindutin ang Spacebar anumang oras upang marinig muli ang mensahe. ' +
+        'Maaari ka ring magsalita ng mga utos. Sabihin ang: magsalita, ulitin, tigil, basahin, ' +
+        'buksan ang emergency, buksan ang settings, buksan ang tips, listen mode, blind mode, ' +
+        'fullscreen, sariling mensahe, home, o isara.'
+      : 'Audio Guide for Blind Accessibility. ' +
+        'Press number 1 on your keyboard for Assistance. Press 2 for Food. Press 3 for Water. ' +
+        'Press 4 for Unwell. Press 5 for Home. Press 6 for Custom Message. ' +
+        'Press Spacebar anytime to repeat your message. ' +
+        'You can also speak commands aloud. Say: speak, repeat, stop, read screen, ' +
+        'open emergency, open settings, open tips, listen mode, blind mode, ' +
+        'fullscreen, custom message, home, or close.';
 
     speakText(guideText, {
       rate: voiceSettings.rate,
@@ -313,7 +327,173 @@ export default function App() {
     [voiceSettings]
   );
 
-  // Auto-scan cycle effect for switch access users
+  const activeCondition = useMemo(() => {
+    const dataSource = voiceSettings.language === 'tl' ? CONDITIONS_DATA_TL : CONDITIONS_DATA;
+    return dataSource[selectedConditionId] || dataSource.deafness;
+  }, [selectedConditionId, voiceSettings.language]);
+
+  // ── GLOBAL VOICE COMMAND ENGINE ──────────────────────────────────────────
+  // Starts on first user interaction (mic permission), runs for the full app session.
+  // Commands work from any screen/modal — just speak the command aloud.
+  const [voiceCommandsActive, setVoiceCommandsActive] = useState(false);
+
+  const buildScreenDescription = useCallback(() => {
+    const isTl = voiceSettings.language === 'tl';
+    const conditionName = activeCondition?.name ?? '';
+    const msg = selectedMessage || (isTl ? 'Walang napiling mensahe' : 'No message selected');
+    if (isTl) {
+      return `Kasalukuyang nasa EasyTalk communication board. Napiling kondisyon: ${conditionName}. Napiling mensahe: ${msg}. Maaari kang magsabi ng: magsalita, buksan ang emergency, buksan ang settings, buksan ang tips, listen mode, blind mode, fullscreen, sariling mensahe, home, o isara.`;
+    }
+    return `You are on the EasyTalk communication board. Selected condition: ${conditionName}. Selected message: ${msg}. You can say: speak, open emergency, open settings, open tips, listen mode, blind mode, fullscreen, custom message, home, or close.`;
+  }, [voiceSettings.language, activeCondition, selectedMessage]);
+
+  // Start the engine once the loading screen is done and the user has interacted
+  useEffect(() => {
+    if (isLoading || showAccessGate) return;
+
+    if (!voiceCommandsActive) {
+      // Request mic permission silently on first render after gate
+      navigator.mediaDevices?.getUserMedia({ audio: true })
+        .then((stream) => {
+          stream.getTracks().forEach((t) => t.stop());
+          setVoiceCommandsActive(true);
+        })
+        .catch(() => {
+          // No mic permission — engine won't start, but app works fine
+        });
+      return;
+    }
+
+    const isTl = voiceSettings.language === 'tl';
+
+    voiceEngine.start({
+      language: voiceSettings.language,
+      voiceGender: voiceSettings.voiceGender,
+      rate: voiceSettings.rate,
+      pitch: voiceSettings.pitch,
+      volume: voiceSettings.volume,
+      voiceURI: voiceSettings.voiceURI,
+      selectedMessage,
+      onOpenEmergency: () => setIsEmergencyOpen(true),
+      onOpenSettings: () => setIsSettingsOpen(true),
+      onOpenTips: () => setIsTipsOpen(true),
+      onOpenListen: handleOpenListenTranscribe,
+      onOpenBlindTouchPad: () => setIsBlindTouchPadOpen(true),
+      onOpenFullscreen: () => setIsFullScreenOpen(true),
+      onOpenCustomMessage: () => setIsCustomModalOpen(true),
+      onCloseAll: () => {
+        setIsSettingsOpen(false);
+        setIsTipsOpen(false);
+        setIsCustomModalOpen(false);
+        setIsFullScreenOpen(false);
+        setIsListenOpen(false);
+        setIsEmergencyOpen(false);
+        setIsBlindTouchPadOpen(false);
+        setIsAboutOpen(false);
+      },
+      onGoHome: handleHomeClick,
+      onSpeakMessage: () => {
+        const phrase = selectedMessage || (isTl ? 'Kailangan ko ng tulong' : 'I need assistance');
+        if (voiceSettings.soundEffects) playSuccessChime();
+        speakText(phrase, {
+          rate: voiceSettings.rate,
+          pitch: voiceSettings.pitch,
+          volume: voiceSettings.volume,
+          voiceURI: voiceSettings.voiceURI,
+          language: voiceSettings.language,
+          voiceGender: voiceSettings.voiceGender,
+        });
+      },
+      onStopSpeaking: () => stopSpeech(),
+      onSelectCard: (index) => {
+        const list = voiceSettings.language === 'tl' ? CORE_QUICK_MESSAGES_TL : CORE_QUICK_MESSAGES;
+        const item = list[index];
+        if (item) handleSelectMessage(item.text, item.iconName);
+      },
+      onSwitchLanguage: (lang) => handleToggleLanguage(lang),
+      onPlayAudioGuide: playEyesClosedAudioGuide,
+      onReadScreen: buildScreenDescription,
+    });
+
+    return () => {
+      voiceEngine.stop();
+    };
+  }, [
+    isLoading,
+    showAccessGate,
+    voiceCommandsActive,
+    voiceSettings,
+    selectedMessage,
+    handleOpenListenTranscribe,
+    handleSelectMessage,
+    handleToggleLanguage,
+    playEyesClosedAudioGuide,
+    buildScreenDescription,
+  ]);
+
+  // Keep the engine context in sync whenever key values change without restarting
+  useEffect(() => {
+    if (!voiceCommandsActive || isLoading || showAccessGate) return;
+    const isTl = voiceSettings.language === 'tl';
+    voiceEngine.updateContext({
+      language: voiceSettings.language,
+      voiceGender: voiceSettings.voiceGender,
+      rate: voiceSettings.rate,
+      pitch: voiceSettings.pitch,
+      volume: voiceSettings.volume,
+      voiceURI: voiceSettings.voiceURI,
+      selectedMessage,
+      onOpenEmergency: () => setIsEmergencyOpen(true),
+      onOpenSettings: () => setIsSettingsOpen(true),
+      onOpenTips: () => setIsTipsOpen(true),
+      onOpenListen: handleOpenListenTranscribe,
+      onOpenBlindTouchPad: () => setIsBlindTouchPadOpen(true),
+      onOpenFullscreen: () => setIsFullScreenOpen(true),
+      onOpenCustomMessage: () => setIsCustomModalOpen(true),
+      onCloseAll: () => {
+        setIsSettingsOpen(false);
+        setIsTipsOpen(false);
+        setIsCustomModalOpen(false);
+        setIsFullScreenOpen(false);
+        setIsListenOpen(false);
+        setIsEmergencyOpen(false);
+        setIsBlindTouchPadOpen(false);
+        setIsAboutOpen(false);
+      },
+      onGoHome: handleHomeClick,
+      onSpeakMessage: () => {
+        const phrase = selectedMessage || (isTl ? 'Kailangan ko ng tulong' : 'I need assistance');
+        speakText(phrase, {
+          rate: voiceSettings.rate,
+          pitch: voiceSettings.pitch,
+          volume: voiceSettings.volume,
+          voiceURI: voiceSettings.voiceURI,
+          language: voiceSettings.language,
+          voiceGender: voiceSettings.voiceGender,
+        });
+      },
+      onStopSpeaking: () => stopSpeech(),
+      onSelectCard: (index) => {
+        const list = voiceSettings.language === 'tl' ? CORE_QUICK_MESSAGES_TL : CORE_QUICK_MESSAGES;
+        const item = list[index];
+        if (item) handleSelectMessage(item.text, item.iconName);
+      },
+      onSwitchLanguage: (lang) => handleToggleLanguage(lang),
+      onPlayAudioGuide: playEyesClosedAudioGuide,
+      onReadScreen: buildScreenDescription,
+    });
+  }, [
+    voiceCommandsActive,
+    isLoading,
+    showAccessGate,
+    voiceSettings,
+    selectedMessage,
+    handleOpenListenTranscribe,
+    handleSelectMessage,
+    handleToggleLanguage,
+    playEyesClosedAudioGuide,
+    buildScreenDescription,
+  ]);
   useEffect(() => {
     if (!voiceSettings.autoScanEnabled) {
       setActiveScanIndex(-1);
@@ -438,11 +618,6 @@ export default function App() {
     };
   }, [isLoading, showAccessGate, selectedMessage, voiceSettings, handleSelectMessage, playEyesClosedAudioGuide]);
 
-  const activeCondition = useMemo(() => {
-    const dataSource = voiceSettings.language === 'tl' ? CONDITIONS_DATA_TL : CONDITIONS_DATA;
-    return dataSource[selectedConditionId] || dataSource.deafness;
-  }, [selectedConditionId, voiceSettings.language]);
-
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => {});
@@ -489,6 +664,20 @@ export default function App() {
         onToggleLanguage={handleToggleLanguage}
         onBackToGate={() => setShowAccessGate(true)}
       />
+
+      {/* Voice Command Active Indicator */}
+      {voiceCommandsActive && (
+        <div
+          className="fixed bottom-4 right-4 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/90 border border-sky-500/60 shadow-lg backdrop-blur-sm text-xs font-bold text-sky-300 select-none pointer-events-none"
+          aria-label="Voice commands active"
+          title={voiceSettings.language === 'tl'
+            ? 'Aktibo ang voice commands. Sabihin ang "help" para marinig ang mga utos.'
+            : 'Voice commands active. Say "help" to hear all commands.'}
+        >
+          <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse shrink-0" />
+          <span>{voiceSettings.language === 'tl' ? 'Voice Commands: ON' : 'Voice Commands: ON'}</span>
+        </div>
+      )}
 
       {/* Main App Content Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-1.5 sm:px-6 md:px-8 py-1 sm:py-4 flex flex-col gap-1.5 sm:gap-4 justify-between">
